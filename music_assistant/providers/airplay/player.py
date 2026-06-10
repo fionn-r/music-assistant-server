@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -16,7 +17,7 @@ from music_assistant_models.enums import (
     PlayerType,
 )
 
-from music_assistant.constants import CONF_ENTRY_SYNC_ADJUST, create_sample_rates_config_entry
+from music_assistant.constants import CONF_ENTRY_SYNC_ADJUST
 from music_assistant.helpers.util import get_primary_ip_address_from_zeroconf, is_valid_mac_address
 from music_assistant.models.player import DeviceInfo, Player, PlayerMedia
 
@@ -25,6 +26,7 @@ from .constants import (
     AIRPLAY_DISCOVERY_TYPE,
     AIRPLAY_FLOW_PCM_FORMAT,
     AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS,
+    AIRPLAY_PCM_FORMAT,
     AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_DEFAULT_MS,
     AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_MAX_MS,
     AIRPLAY_SESSION_ESTABLISHMENT_LATENCY_MIN_MS,
@@ -43,6 +45,7 @@ from .constants import (
     CONF_PAIRING_PIN,
     CONF_PASSWORD,
     CONF_RAOP_CREDENTIALS,
+    CONF_RAOP_LATENCY,
     CONF_SESSION_ESTABLISHMENT_LATENCY,
     CONF_STORED_VOLUME,
     FALLBACK_VOLUME,
@@ -51,6 +54,8 @@ from .constants import (
     PIN_REQUIRED,
     RAOP_CONNECT_TIME_MS,
     RAOP_DISCOVERY_TYPE,
+    RAOP_OUTPUT_BUFFER_MAX_DURATION_MS,
+    RAOP_OUTPUT_BUFFER_MIN_DURATION_MS,
     StreamingProtocol,
 )
 from .helpers import (
@@ -69,6 +74,9 @@ if TYPE_CHECKING:
     from .protocols.airplay2 import AirPlay2Stream
     from .protocols.raop import RaopStream
     from .provider import AirPlayProvider
+
+# Docker bridge subnet, sometimes wrongly advertised via mDNS by containerized devices.
+_DOCKER_SUBNET = ipaddress.ip_network("172.16.0.0/12")
 
 
 class AirPlayPlayer(Player):
@@ -112,6 +120,9 @@ class AirPlayPlayer(Player):
         self._attr_volume_level = initial_volume
         self._attr_can_group_with = {provider.instance_id}
         self._attr_enabled_by_default = not is_broken_airplay_model(manufacturer, model)
+        self._attr_supported_sample_rates = [
+            (AIRPLAY_PCM_FORMAT.sample_rate, AIRPLAY_PCM_FORMAT.bit_depth)
+        ]
 
         # Set player type based on manufacturer/model:
         # - Apple devices (HomePod, Apple TV) have native AirPlay support -> PLAYER
@@ -148,11 +159,6 @@ class AirPlayPlayer(Player):
     def supported_features(self) -> set[PlayerFeature]:
         """Return the supported features of this player."""
         features = set(BASE_PLAYER_FEATURES)
-        if self.protocol == StreamingProtocol.AIRPLAY2:
-            # AP2 sync is broken — cliap2 doesn't respect the NTP start time
-            # correctly, so grouping produces multi-second sync offsets.
-            # See https://github.com/music-assistant/cliairplay/issues/102
-            features.discard(PlayerFeature.SET_MEMBERS)
         if not (self.group_members or self.synced_to):
             # we only support pause when the player is not synced,
             # because we don't want to deal with the complexity of pausing a group of players
@@ -165,23 +171,23 @@ class AirPlayPlayer(Player):
     def can_group_with(self) -> set[str]:
         """Return player IDs this player can group with.
 
-        AP2 players cannot group (broken NTP sync in cliap2).
-        RAOP players can group with other RAOP players only.
+        RAOP and AP2 players can group with other RAOP and/or AP2 players.
         """
-        if self.protocol == StreamingProtocol.AIRPLAY2:
-            return set()
         prov = cast("AirPlayProvider", self.provider)
         return {
-            p.player_id
-            for p in prov.get_players()
-            if p.available
-            and p.player_id != self.player_id
-            and p.protocol != StreamingProtocol.AIRPLAY2
+            p.player_id for p in prov.get_players() if p.available and p.player_id != self.player_id
         }
 
     @property
     def output_buffer_duration_ms(self) -> int:
         """Get the output buffer duration in milliseconds."""
+        # Only the RAOP (AirPlay 1) path exposes a configurable read-ahead buffer;
+        # AirPlay 2 uses the fixed default to avoid interfering with sync.
+        if self.protocol == StreamingProtocol.RAOP:
+            return cast(
+                "int",
+                self.config.get_value(CONF_RAOP_LATENCY, AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS),
+            )
         return AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS
 
     @property
@@ -302,9 +308,26 @@ class AirPlayPlayer(Player):
                 category="protocol_generic",
                 advanced=True,
             ),
-            # airplay has fixed sample rate/bit depth so make this config entry static and hidden
-            create_sample_rates_config_entry(
-                supported_sample_rates=[44100], supported_bit_depths=[16], hidden=True
+            ConfigEntry(
+                key=CONF_RAOP_LATENCY,
+                type=ConfigEntryType.INTEGER,
+                default_value=AIRPLAY_OUTPUT_BUFFER_DEFAULT_DURATION_MS,
+                range=(
+                    RAOP_OUTPUT_BUFFER_MIN_DURATION_MS,
+                    RAOP_OUTPUT_BUFFER_MAX_DURATION_MS,
+                ),
+                label="Milliseconds of data to buffer",
+                description=(
+                    "The number of milliseconds of data to buffer\n"
+                    "NOTE: This adds to the latency experienced for commencement "
+                    "of playback. \n"
+                    "Try increasing value if playback is unreliable."
+                ),
+                depends_on=CONF_AIRPLAY_PROTOCOL,
+                depends_on_value=StreamingProtocol.RAOP.value,
+                hidden=not is_raop,
+                category="protocol_generic",
+                advanced=True,
             ),
             ConfigEntry(
                 key=CONF_SESSION_ESTABLISHMENT_LATENCY,
@@ -316,9 +339,7 @@ class AirPlayPlayer(Player):
                 ),
                 label="Expected milliseconds to establish streaming session with the AirPlay device.",
                 description="Adjust this value only if playback is out of sync or does not work.\n"
-                "The log will contain an INFO entry showing the actual time "
-                "taken to establish the session. Set your config value somewhere in the window "
-                "of 600ms less than and no more than 100ms greater than the actual time.",
+                "The log will contain a WARNING entry showing a recommendation.",
                 hidden=is_raop,
                 category="protocol_generic",
                 advanced=True,
@@ -904,6 +925,22 @@ class AirPlayPlayer(Player):
             # should always be set, but guard against None
             return
         if cur_address != new_address:
+            # Ignore mDNS updates that replace a routable address with a Docker bridge one.
+            try:
+                if (
+                    cur_address
+                    and ipaddress.ip_address(new_address) in _DOCKER_SUBNET
+                    and ipaddress.ip_address(cur_address) not in _DOCKER_SUBNET
+                ):
+                    self.logger.warning(
+                        "Ignoring mDNS update from %s to Docker address %s",
+                        cur_address,
+                        new_address,
+                    )
+                    self.update_state()
+                    return
+            except ValueError:
+                pass
             self.logger.debug("Address updated from %s to %s", cur_address, new_address)
             self._attr_device_info.add_identifier(IdentifierType.IP_ADDRESS, new_address)
             self.address = new_address
@@ -958,12 +995,7 @@ class AirPlayPlayer(Player):
         await super().on_config_updated()
         prov = cast("AirPlayProvider", self.provider)
         bridge_manager = prov.bridge_manager
-        has_bridge = bridge_manager.get_bridge(self.player_id) is not None
-        if self.protocol == StreamingProtocol.AIRPLAY2 and has_bridge:
-            # AP2 doesn't support sync — tear down the Sendspin bridge
-            await bridge_manager.remove_bridge(self.player_id)
-        elif self.protocol != StreamingProtocol.AIRPLAY2 and not has_bridge:
-            # Switched back to RAOP — set up the Sendspin bridge
+        if bridge_manager.get_bridge(self.player_id) is None:
             await bridge_manager.setup_bridge(self)
 
     async def on_unload(self) -> None:
