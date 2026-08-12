@@ -1,0 +1,15 @@
+{
+  "config_entries": {
+    "cookie": {
+      "label": "Login Cookie",
+      "description": "Optional. A login cookie grabbed from an existing browser session, only needed to play age restricted or otherwise private videos."
+    },
+    "po_token_server_url": {
+      "label": "PO Token Server URL",
+      "description": "Optional. URL to a BgUtil PO Token server (e.g. `http://127.0.0.1:4416`). Only needed when YouTube starts refusing anonymous playback."
+    }
+  },
+  "manifest": {
+    "description": "Search and play the audio of plain YouTube videos."
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "music",
+  "domain": "youtube",
+  "stage": "experimental",
+  "name": "YouTube",
+  "description": "Search and play the audio of plain YouTube videos.",
+  "codeowners": ["@local"],
+  "requirements": ["deno==2.7.12"],
+  "multi_instance": false,
+  "icon": "youtube"
+}
