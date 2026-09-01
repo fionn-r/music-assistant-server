@@ -90,6 +90,11 @@ class BBCSoundsProvider(RecommendationPayloadMixin, MusicProvider):
     menu: Menu | None = None
     logged_in: bool = False
 
+    @property
+    def max_concurrent_streams(self) -> None:
+        """Allow unlimited concurrent upstream source streams."""
+        return None
+
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to setup this provider."""
         return (
@@ -688,12 +693,10 @@ class BBCSoundsProvider(RecommendationPayloadMixin, MusicProvider):
                         self.logger.error(f"Error updating play status: {err}")
 
     async def _fetch_recommendation_payload(self) -> list[RecommendationFolder]:
-        """Fetch the experience-menu recommendation folders, with items."""
+        """Fetch the recommendation menu folders, with items."""
         self.logger.debug("Getting recommendations from API")
         folders: list[RecommendationFolder] = []
-        recommendations = await self.client.personal.get_experience_menu(
-            recommendations=MenuRecommendationOptions.ONLY
-        )
+        recommendations = await self.client.get_menu(recommendations=MenuRecommendationOptions.ONLY)
         if recommendations.sub_items:
             for recommendation in recommendations.sub_items:
                 # recommendation is a RecommendedMenuItem
