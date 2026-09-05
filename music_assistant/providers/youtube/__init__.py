@@ -190,10 +190,20 @@ class YoutubeProvider(MusicProvider):
         """Install frequently changing packages dynamically."""
         # NOTE: Google breaks things quite often which requires us to update
         # yt-dlp very frequently. Installing it dynamically prevents us from
-        # having to update MA to ensure this provider works.
-        await install_package(PACKAGE_TO_INSTALL)
+        # having to update MA to ensure this provider works. The requirements are
+        # deliberately unpinned and installed with upgrade=True: without it an
+        # already installed (outdated) yt-dlp is left alone and playback breaks as
+        # soon as Google retires the player client that version falls back to.
+        packages = [PACKAGE_TO_INSTALL]
         if self._po_token_server_url:
-            await install_package(PO_TOKEN_PACKAGE_TO_INSTALL)
+            packages.append(PO_TOKEN_PACKAGE_TO_INSTALL)
+        for package in packages:
+            try:
+                await install_package(package, upgrade=True)
+            except RuntimeError as err:
+                # a failed upgrade (offline, PyPI hiccup) must not take down a provider
+                # that still has a working version installed from an earlier run
+                self.logger.warning("Failed to install/upgrade %s: %s", package, err)
         try:
             await import_module_in_thread("yt_dlp")
         except ImportError:

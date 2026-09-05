@@ -1336,10 +1336,18 @@ def empty_queue[T](q: asyncio.Queue[T]) -> None:
             pass
 
 
-async def install_package(package: str) -> None:
-    """Install package with pip, raise when install failed."""
+async def install_package(package: str, *, upgrade: bool = False) -> None:
+    """
+    Install package with pip, raise when install failed.
+
+    :param package: The (pip) requirement to install.
+    :param upgrade: Also upgrade the package when an older version is already installed.
+        Only useful for unpinned requirements that need to track upstream closely.
+    """
     LOGGER.debug("Installing python package %s", package)
     args = ["uv", "pip", "install", "--no-cache", package]
+    if upgrade:
+        args.insert(-1, "--upgrade")
     return_code, output = await check_output(*args)
     if return_code != 0:
         msg = f"Failed to install package {package}\n{output.decode()}"
