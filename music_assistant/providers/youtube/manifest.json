@@ -5,7 +5,7 @@
   "name": "YouTube",
   "description": "Search and play the audio of plain YouTube videos.",
   "codeowners": ["@local"],
-  "requirements": ["deno==2.7.12"],
+  "requirements": ["deno==2.9.5"],
   "multi_instance": false,
   "icon": "youtube"
 }
