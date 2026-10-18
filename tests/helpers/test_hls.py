@@ -277,3 +277,73 @@ seg-279721740.ts
     assert vod.media_sequence == 0
     assert vod.target_duration is None
     assert vod.ended
+
+
+_FMP4_PLAYLIST = """#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:5
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="/keys/key.bin"
+#EXTINF:10.0,
+data000.m4s
+#EXTINF:10.0,
+data001.m4s
+#EXTINF:5.0,
+https://cdn.example.com/other/data002.m4s
+#EXT-X-ENDLIST
+"""
+
+
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        (0, (0, 0.0)),
+        (9.5, (0, 9.5)),
+        (10, (1, 0.0)),
+        (24, (2, 4.0)),
+        (25, (2, 0.0)),
+        (9000, (2, 0.0)),
+    ],
+)
+def test_segment_at(position: float, expected: tuple[int, float]) -> None:
+    """A position maps to the segment holding it; one past the end to the last segment."""
+    playlist = HLSMediaPlaylistParser(_FMP4_PLAYLIST).parse()
+    assert playlist.segment_at(position) == expected
+
+
+def test_render_from_segment() -> None:
+    """A rendered tail keeps the init section and key, with absolute URIs and its own sequence."""
+    playlist = HLSMediaPlaylistParser(_FMP4_PLAYLIST).parse()
+
+    rendered = playlist.render(1, base_url="https://media.example.com/track/playlist.m3u8")
+
+    assert rendered == (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:7\n"
+        "#EXT-X-TARGETDURATION:10\n"
+        "#EXT-X-MEDIA-SEQUENCE:6\n"
+        "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        '#EXT-X-MAP:URI="https://media.example.com/track/init.mp4"\n'
+        '#EXT-X-KEY:METHOD=AES-128,URI="https://media.example.com/keys/key.bin"\n'
+        "#EXTINF:10.0,\n"
+        "https://media.example.com/track/data001.m4s\n"
+        "#EXTINF:5.0,\n"
+        "https://cdn.example.com/other/data002.m4s\n"
+        "#EXT-X-ENDLIST\n"
+    )
+    # the rendered playlist reads back as the same tail
+    reparsed = HLSMediaPlaylistParser(rendered).parse()
+    assert [segment.duration for segment in reparsed.segments] == [10.0, 5.0]
+    assert reparsed.media_sequence == 6
+
+
+def test_render_adds_media_sequence_when_trimmed() -> None:
+    """A playlist without a media sequence gets one once segments are left out."""
+    playlist = HLSMediaPlaylistParser(
+        "#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST"
+    ).parse()
+
+    assert playlist.render() == "#EXTM3U\n#EXTINF:1,\na.ts\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n"
+    assert "#EXT-X-MEDIA-SEQUENCE:1\n" in playlist.render(1)

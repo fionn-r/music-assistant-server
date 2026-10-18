@@ -6,12 +6,16 @@ For simple variant stream selection from master playlists, use helpers.playlists
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urljoin
 
 from music_assistant_models.errors import InvalidDataError
 
 from music_assistant.helpers.datetime import from_iso_string
+
+_URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]*)"')
 
 
 @dataclass
@@ -93,6 +97,66 @@ class HLSMediaPlaylist:
     def ended(self) -> bool:
         """Return whether no more segments will be added to the playlist."""
         return "#EXT-X-ENDLIST" in self.footer_lines
+
+    def segment_at(self, position: float) -> tuple[int, float]:
+        """
+        Return the index of the segment that holds a position, and the offset into it.
+
+        A position past the end of the playlist lands at the start of its last segment.
+
+        :param position: Position in seconds from the start of the playlist.
+        """
+        segment_start = 0.0
+        for index, segment in enumerate(self.segments):
+            if position < segment_start + segment.duration:
+                return index, max(0.0, position - segment_start)
+            segment_start += segment.duration
+        return max(0, len(self.segments) - 1), 0.0
+
+    def render(self, start_index: int = 0, base_url: str | None = None) -> str:
+        """
+        Return the playlist as text, leaving out the segments before start_index.
+
+        The media sequence number follows the first segment that is kept, as the
+        default IV of an encrypted segment derives from it.
+
+        :param start_index: Index of the first segment to include.
+        :param base_url: URL the playlist was fetched from, to make relative URIs absolute.
+        """
+
+        def _absolute(uri: str) -> str:
+            return urljoin(base_url, uri) if base_url else uri
+
+        def _absolute_attribute(line: str) -> str:
+            return _URI_ATTRIBUTE_RE.sub(lambda match: f'URI="{_absolute(match[1])}"', line)
+
+        sequence_line = f"#EXT-X-MEDIA-SEQUENCE:{self.media_sequence + start_index}"
+        lines = [
+            sequence_line if line.startswith("#EXT-X-MEDIA-SEQUENCE:") else line
+            for line in self.header_lines
+        ]
+        if start_index and sequence_line not in lines:
+            lines.append(sequence_line)
+        # EXT-X-MAP and EXT-X-KEY apply until overridden, so each is written where it changes
+        prev_map_line: str | None = None
+        prev_key_line: str | None = None
+        for segment in self.segments[start_index:]:
+            if segment.discontinuity:
+                lines.append("#EXT-X-DISCONTINUITY")
+            if segment.program_date_time:
+                lines.append(segment.program_date_time)
+            if segment.map_line and segment.map_line != prev_map_line:
+                lines.append(_absolute_attribute(segment.map_line))
+                prev_map_line = segment.map_line
+            if segment.key_line and segment.key_line != prev_key_line:
+                lines.append(_absolute_attribute(segment.key_line))
+                prev_key_line = segment.key_line
+            lines.append(segment.extinf_line)
+            if segment.byterange_line:
+                lines.append(segment.byterange_line)
+            lines.append(_absolute(segment.segment_url))
+        lines.extend(self.footer_lines)
+        return "\n".join(lines) + "\n"
 
     def _header_value(self, tag: str) -> str | None:
         """Return the value of a header tag, if present."""

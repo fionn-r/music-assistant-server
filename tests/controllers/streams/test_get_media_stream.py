@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import aiohttp
 import pytest
 from music_assistant_models.enums import ContentType, MediaType, ProviderType, StreamType
 from music_assistant_models.errors import AudioError, ProviderUnavailableError
@@ -1200,3 +1201,135 @@ async def test_get_media_stream_leaves_other_streams_alone(
     assert "-skip_initial_bytes" not in args
     assert "-fflags" not in args
     assert args[: len(input_args)] == input_args
+
+
+_HLS_PLAYLIST_URL = "https://media.example.com/track/playlist.m3u8"
+_FMP4_HLS_PLAYLIST = """#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:10.0,
+data000.m4s
+#EXTINF:10.0,
+data001.m4s
+#EXTINF:10.0,
+data002.m4s
+#EXT-X-ENDLIST
+"""
+
+
+def _hls_track_streamdetails() -> StreamDetails:
+    """Build seekable StreamDetails of an on-demand HLS track without provider input args."""
+    return StreamDetails(
+        provider="test_provider",
+        item_id="track-1",
+        audio_format=AudioFormat(content_type=ContentType.UNKNOWN),
+        media_type=MediaType.TRACK,
+        stream_type=StreamType.HLS,
+        path=_HLS_PLAYLIST_URL,
+        duration=30,
+        can_seek=True,
+        allow_seek=True,
+    )
+
+
+def _serve_hls_playlist(
+    monkeypatch: pytest.MonkeyPatch, audio: StreamsAudio, playlist_text: str | None
+) -> list[str]:
+    """
+    Serve the given media playlist to the controller and record the URLs it fetches.
+
+    :param playlist_text: The playlist to serve, or None for a fetch that fails.
+    """
+    fetched: list[str] = []
+
+    async def _get_hls_substream(url: str) -> SimpleNamespace:
+        return SimpleNamespace(path=url)
+
+    async def _fetch_hls_playlist(url: str) -> tuple[str, str]:
+        fetched.append(url)
+        if playlist_text is None:
+            raise aiohttp.ClientError("unreachable")
+        return url, playlist_text
+
+    monkeypatch.setattr(audio, "get_hls_substream", _get_hls_substream)
+    monkeypatch.setattr(audio, "_fetch_hls_playlist", _fetch_hls_playlist)
+    return fetched
+
+
+@pytest.mark.asyncio
+async def test_get_media_stream_seeks_fmp4_hls_on_the_playlist(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_ffmpeg: type[_FakeFFMpeg],
+) -> None:
+    """
+    A seek into fragmented MP4 HLS starts ffmpeg on the playlist from the seek segment.
+
+    FFmpeg 7 produces no audio when it seeks into such a playlist itself, so the
+    playlist is handed over on stdin, which also keeps its segment URLs in the server.
+    """
+    audio = _make_audio_controller()
+    _serve_hls_playlist(monkeypatch, audio, _FMP4_HLS_PLAYLIST)
+
+    await _drain(audio.get_media_stream(_hls_track_streamdetails(), _make_pcm_format(), 14))
+
+    ffmpeg = patch_ffmpeg.last_instance
+    assert ffmpeg is not None
+    assert ffmpeg.extra_input_args == ["-ss", "4.000", "-f", "hls", "-i", "-"]
+    assert isinstance(ffmpeg.audio_input, AsyncGenerator)
+    playlist = b"".join([chunk async for chunk in ffmpeg.audio_input]).decode()
+    assert "#EXT-X-MEDIA-SEQUENCE:1\n" in playlist
+    assert '#EXT-X-MAP:URI="https://media.example.com/track/init.mp4"\n' in playlist
+    assert "data000.m4s" not in playlist
+    assert "https://media.example.com/track/data001.m4s\n" in playlist
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "variant",
+    ["no-seek", "mpegts", "live", "byterange", "fetch-failed", "provider-args", "radio"],
+)
+async def test_get_media_stream_leaves_other_hls_seeks_to_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_ffmpeg: type[_FakeFFMpeg],
+    variant: str,
+) -> None:
+    """Everything but a seek into on-demand fMP4 HLS opens the playlist URL as before."""
+    audio = _make_audio_controller()
+    streamdetails = _hls_track_streamdetails()
+    playlist_text: str | None = _FMP4_HLS_PLAYLIST
+    seek_position = 14
+    expected_args = ["-ss", "14"]
+    expect_fetch = True
+    match variant:
+        case "no-seek":
+            seek_position = 0
+            expected_args = []
+            expect_fetch = False
+        case "mpegts":
+            playlist_text = "#EXTM3U\n#EXTINF:10,\na.ts\n#EXTINF:10,\nb.ts\n#EXT-X-ENDLIST"
+        case "live":
+            playlist_text = _FMP4_HLS_PLAYLIST.replace("#EXT-X-ENDLIST\n", "")
+        case "byterange":
+            playlist_text = _FMP4_HLS_PLAYLIST.replace(
+                "#EXTINF:10.0,\ndata001", "#EXTINF:10.0,\n#EXT-X-BYTERANGE:1000\ndata001"
+            )
+        case "fetch-failed":
+            playlist_text = None
+        case "provider-args":
+            streamdetails.extra_input_args = [*_PROVIDER_INPUT_ARGS]
+            expected_args = [*_PROVIDER_INPUT_ARGS, "-ss", "14"]
+            expect_fetch = False
+        case "radio":
+            streamdetails.media_type = MediaType.RADIO
+            expected_args = ["-stream_loop", "-1", "-re", "-ss", "14"]
+            expect_fetch = False
+    fetched = _serve_hls_playlist(monkeypatch, audio, playlist_text)
+
+    await _drain(audio.get_media_stream(streamdetails, _make_pcm_format(), seek_position))
+
+    ffmpeg = patch_ffmpeg.last_instance
+    assert ffmpeg is not None
+    assert ffmpeg.audio_input == _HLS_PLAYLIST_URL
+    assert ffmpeg.extra_input_args == expected_args
+    assert fetched == ([_HLS_PLAYLIST_URL] if expect_fetch else [])

@@ -158,6 +158,7 @@ from music_assistant.helpers.ffmpeg import (
     get_ffmpeg_overlay_stream,
     get_ffmpeg_stream,
 )
+from music_assistant.helpers.hls import HLSMediaPlaylistParser
 from music_assistant.helpers.mp3 import (
     NO_SEEK_HINTS,
     Mp3SeekHints,
@@ -294,6 +295,11 @@ def _snap_supported_rate_down(target: int, supported_sample_rates: list[int]) ->
         return target
     lower = [r for r in supported_sample_rates if r < target]
     return max(lower) if lower else min(supported_sample_rates)
+
+
+async def _single_chunk(data: bytes) -> AsyncGenerator[bytes]:
+    """Yield the given data as a stream of one chunk."""
+    yield data
 
 
 async def _continue_mix(head: bytes, mix: AsyncGenerator[bytes]) -> AsyncGenerator[bytes]:
@@ -1082,20 +1088,9 @@ class StreamsAudio:
 
     async def get_hls_substream(self, url: str) -> PlaylistItem:
         """Select the (highest quality) HLS substream for given HLS playlist/URL."""
-        mass = self.mass
-        timeout = ClientTimeout(total=None, connect=30, sock_read=5 * 60)
         # fetch master playlist and select (best) child playlist
         # https://datatracker.ietf.org/doc/html/draft-pantos-http-live-streaming-19#section-10
-        async with mass.http_session_no_ssl.get(
-            encoded_request_url(url), allow_redirects=True, headers=HTTP_HEADERS, timeout=timeout
-        ) as resp:
-            resp.raise_for_status()
-            raw_data = await resp.read()
-            encoding = await detect_charset(raw_data, preferred=resp.charset)
-            master_m3u_data = raw_data.decode(encoding, errors="replace")
-            # replaces the current selected url with the actual url if there was a 302 forward
-            if url != str(resp.real_url):
-                url = str(resp.real_url)
+        url, master_m3u_data = await self._fetch_hls_playlist(url)
         substreams = parse_m3u(master_m3u_data)
         # There is a chance that we did not get a master playlist with subplaylists
         # but just a single master/sub playlist with the actual audio stream(s)
@@ -5097,6 +5092,23 @@ class StreamsAudio:
                 # with ffmpeg, where they just stop after some minutes,
                 # so we tell ffmpeg to loop around in this case.
                 extra_input_args += ["-stream_loop", "-1", "-re"]
+            elif (
+                seek_position
+                # provider args such as headers apply to an http input, not to stdin
+                and not extra_input_args
+                and streamdetails.verify_ssl
+                and (
+                    seek_playlist := await self._get_hls_seek_playlist(
+                        substream.path, seek_position
+                    )
+                )
+            ):
+                # ffmpeg reads the playlist from stdin, so its segment URLs never leave the server
+                playlist_data, offset = seek_playlist
+                if offset:
+                    extra_input_args += ["-ss", f"{offset:.3f}"]
+                extra_input_args += ["-f", "hls", "-i", "-"]
+                return _single_chunk(playlist_data), 0, extra_input_args
             return substream.path, seek_position, extra_input_args
 
         # all other stream types (HTTP, FILE, etc)
@@ -5867,3 +5879,58 @@ class StreamsAudio:
             # seeks by bitrate or the Xing TOC instead of decoding up to the position: exact for
             # CBR, while VBR lands seconds off with a TOC and can be minutes off without one
             add_input_fflag(extra_input_args, "+fastseek")
+
+    async def _get_hls_seek_playlist(
+        self, url: str, seek_position: int
+    ) -> tuple[bytes, float] | None:
+        """
+        Return a copy of an on-demand fragmented MP4 HLS playlist that starts at a position.
+
+        FFmpeg before 8.0 produces no audio at all when it seeks into fragmented MP4 HLS
+        itself (https://trac.ffmpeg.org/ticket/7359), while it does start cleanly at the
+        first segment of a playlist.
+
+        :param url: URL of the HLS media playlist.
+        :param seek_position: Position to seek to, in seconds.
+        :return: The playlist and the seconds still to skip into its first segment, or None
+            when the playlist is not an on-demand fragmented MP4 one or can not be read.
+        """
+        try:
+            url, playlist_text = await self._fetch_hls_playlist(url)
+            playlist = HLSMediaPlaylistParser(playlist_text).parse()
+        except (aiohttp.ClientError, TimeoutError, InvalidDataError) as err:
+            self.logger.debug("Unable to read HLS playlist %s to seek in: %s", url, err)
+            return None
+        if (
+            not playlist.ended
+            # MPEG-TS segments seek fine in ffmpeg
+            or not all(segment.map_line for segment in playlist.segments)
+            # a byte range without offset continues from the segment before it
+            or any(segment.byterange_line for segment in playlist.segments)
+        ):
+            return None
+        start_index, offset = playlist.segment_at(seek_position)
+        self.logger.debug(
+            "Seeking HLS playlist to %ss: segment %s of %s, %.2fs into it",
+            seek_position,
+            start_index,
+            len(playlist.segments),
+            offset,
+        )
+        return playlist.render(start_index, base_url=url).encode(), offset
+
+    async def _fetch_hls_playlist(self, url: str) -> tuple[str, str]:
+        """
+        Fetch an HLS playlist.
+
+        :param url: URL of the playlist.
+        :return: The URL the playlist was served from after redirects, and its text.
+        """
+        timeout = ClientTimeout(total=None, connect=30, sock_read=5 * 60)
+        async with self.mass.http_session_no_ssl.get(
+            encoded_request_url(url), allow_redirects=True, headers=HTTP_HEADERS, timeout=timeout
+        ) as resp:
+            resp.raise_for_status()
+            raw_data = await resp.read()
+            encoding = await detect_charset(raw_data, preferred=resp.charset)
+            return str(resp.real_url), raw_data.decode(encoding, errors="replace")
