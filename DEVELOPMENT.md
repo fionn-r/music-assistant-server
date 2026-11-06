@@ -100,6 +100,8 @@ sort fields. `music/sort_options` remains the authority for the sorts each listi
 accepting a seed does not add Random to a listing's offered options. Provider methods are
 unchanged; the server applies search, sort and paging to their listings.
 
+For the shared API parameters and client migration notes, see the [listing contract](https://developers.music-assistant.io/listing-contract/).
+
 ## Note on async Python
 The Music Assistant server is fully built in Python. The Python language has no real supported for multi-threading. This is why Music Assistant heavily relies on asyncio to handle blocking IO. It is important to get a good understanding of asynchronous programming before building your first provider. [This](https://www.youtube.com/watch?v=M-UcUs7IMIM) video is an excellent first step in the world of asyncio.
 
@@ -193,6 +195,8 @@ The manifest file contains metadata and configuration about a provider. The supp
 | name  | The full name of the provider, e.g. `Spotify` or `Youtube Music`  | string  |
 | description  | The full description of the provider  | string  |
 | codeowners  | List of Github names of the codeowners of the provider  | array[string]  |
+| tier | `core` or `community`: who builds and maintains the provider. `core` requires `@music-assistant` in `codeowners`; everything else is `community`. Required for every provider that ships. | string |
+| support_url | Optional https URL where the maintainer takes bug reports and questions, when not the project's support repository. | string |
 | stage | The development/stability stage: `alpha`, `beta`, `stable`, `experimental`, `unmaintained` or `deprecated`. Defaults to `stable`. | string |
 | requirements | Python packages the provider needs, in standard pip / [PEP 508](https://peps.python.org/pep-0508/) requirement syntax, e.g. `package==version`, a version range, an extras marker, or a `git+https://…` direct reference | array[string] |
 | documentation | URL to the provider's documentation page. | string |

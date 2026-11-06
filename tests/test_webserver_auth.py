@@ -31,6 +31,7 @@ from music_assistant_models.translations import TRANSLATION_RESOLVER
 from music_assistant.constants import (
     CONF_PLAYERS,
     CONF_PROVIDERS,
+    DB_TABLE_BOOKMARKS,
     DB_TABLE_MEDIA_PROGRESS,
     DB_TABLE_PLAY_HISTORY,
     HOMEASSISTANT_SYSTEM_USER,
@@ -945,6 +946,7 @@ async def test_delete_user_removes_dependent_rows(
     assert progress_delete.await_args_list == [
         call(DB_TABLE_MEDIA_PROGRESS, {"userid": user.user_id}),
         call(DB_TABLE_PLAY_HISTORY, {"userid": user.user_id}),
+        call(DB_TABLE_BOOKMARKS, {"user_id": user.user_id}),
     ]
 
 
@@ -3706,6 +3708,17 @@ async def test_resolve_command_impersonation(auth_manager: AuthenticationManager
     resolved = await resolve_command_impersonation(auth_manager.mass, args)
     assert resolved == standard_user
 
+    # user wins over the deprecated username alias, both are popped
+    args = {"user": "user_a", "username": "admin"}
+    assert await resolve_command_impersonation(auth_manager.mass, args) == standard_user
+    assert args == {}
+
+    # a disabled user can not be impersonated
+    await auth_manager.disable_user(standard_user.user_id)
+    with pytest.raises(UserNotFoundError):
+        await resolve_command_impersonation(auth_manager.mass, {"user": "user_a"})
+    await auth_manager.enable_user(standard_user.user_id)
+
     # a caller without the users.impersonate scope may not impersonate another user
     set_current_user(standard_user)
     with pytest.raises(InsufficientPermissions):
@@ -3773,6 +3786,29 @@ async def test_resolve_command_impersonation_provider_link(
         await resolve_command_impersonation(
             auth_manager.mass, {"user": {"provider": "homeassistant", "user_id": "ha-user-1"}}
         )
+
+
+async def test_resolve_command_impersonation_checks_the_target_scope(
+    auth_manager: AuthenticationManager,
+) -> None:
+    """The impersonated user must hold the command's scope, as impersonation grants nothing."""
+    service_user = await auth_manager.create_user(username="ha_service", role=UserRole.SERVICE)
+    guest_user = await auth_manager.create_user(username="guest", role=UserRole.GUEST)
+    set_current_user(service_user)
+    set_impersonated_user(None)
+    mass = auth_manager.mass
+
+    # a guest holds library.read, and one scope of a tuple suffices like for the caller
+    assert await resolve_command_impersonation(mass, {"user": "guest"}, Scope.LIBRARY_READ)
+    assert await resolve_command_impersonation(
+        mass, {"user": "guest"}, (Scope.LIBRARY_WRITE, Scope.LIBRARY_READ)
+    )
+    # a command without a required scope checks nothing
+    assert await resolve_command_impersonation(mass, {"user": "guest"}) == guest_user
+
+    # the service caller holds library.write, the guest it acts for does not
+    with pytest.raises(InsufficientPermissions, match="impersonated user lacks"):
+        await resolve_command_impersonation(mass, {"user": "guest"}, Scope.LIBRARY_WRITE)
 
 
 def test_has_scope() -> None:

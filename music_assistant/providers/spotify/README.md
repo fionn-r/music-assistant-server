@@ -94,7 +94,10 @@ audio prefs, wire models) is shared infrastructure owned by the Spotify Connect 
   is it. A request for another item while a run is live is reported as
   `ProviderStreamLimitError` capacity: a speculative prepare gives up softly (or waits
   its slot budget out), and the real request gets the slot once the stream holding it
-  is released. The slot frees the moment an item's audio has *fully arrived* — the
+  is released. A start on *another player* while a run plays is refused at once with
+  `ProviderStreamHeldError`, naming the player that holds Spotify: the run delivers at
+  playback pace, so nothing would free the slot within the wait budget anyway. The slot
+  frees the moment an item's audio has *fully arrived* — the
   buffer's fill closes the provider stream at EOF and the fill-complete hook starts
   fetching the next queue item right away, so the engine's ~1.1x delivery surplus
   compounds across a listening session. A new request for the very item being
@@ -103,9 +106,11 @@ audio prefs, wire models) is shared infrastructure owned by the Spotify Connect 
   taking the run back.
 - **The Spotify app cannot reach in.** Single-track mode advertises no Connect device
   and disables remote control and transfer for its playback context, so there is
-  nothing for the app to move, pause or take over. Playing on the account from another
+  nothing for the app to move or take over. Playing on the account from another
   device can still kill the stream Spotify-side; that ends the run as an incomplete
-  delivery and the queue moves on.
+  delivery and the queue moves on. A pause from the app or Web API still reaches the
+  engine, and a paused engine stalls the stream, so the run stops the queue on it. Play
+  in Music Assistant resumes at the same position; play in the Spotify app does not.
 - **The engine never crossfades**: its own crossfade is written off in the prefs before
   every spawn, so each track's audio arrives clean from its first sample. Music Assistant
   mixes the boundary itself from the tail it holds back, which is what keeps waveforms,

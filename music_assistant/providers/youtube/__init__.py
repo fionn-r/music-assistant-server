@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 
 CONF_COOKIE = "cookie"
-CONF_PO_TOKEN_SERVER_URL = "po_token_server_url"
+CONF_PO_TOKEN_SERVER_URL = "po_token_server_url"  # noqa: S105 - URL
 
 YT_DOMAIN = "https://www.youtube.com"
 YT_COOKIE_DOMAIN = ".youtube.com"
@@ -58,7 +58,7 @@ WATCH_URL = f"{YT_DOMAIN}/watch?v={{0}}"
 UNKNOWN_ARTIST_ID = "youtube_unknown_channel"
 DEFAULT_STREAM_URL_EXPIRATION = 3600  # 1 hour
 PACKAGE_TO_INSTALL = "yt-dlp[default]"
-PO_TOKEN_PACKAGE_TO_INSTALL = "bgutil-ytdlp-pot-provider"
+PO_TOKEN_PACKAGE_TO_INSTALL = "bgutil-ytdlp-pot-provider"  # noqa: S105 - package name
 
 SUPPORTED_FEATURES = {ProviderFeature.SEARCH}
 

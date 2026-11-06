@@ -48,6 +48,7 @@ from music_assistant.controllers.streams.constants import (
 )
 from music_assistant.controllers.streams.stream_sources import rank_provider_mappings
 from music_assistant.helpers.api import api_command
+from music_assistant.helpers.audio import pcm_container_bit_depth
 from music_assistant.helpers.datetime import local_clock_time_to_utc, utc_timestamp
 from music_assistant.helpers.util import inference_thread_budget, is_arm
 from music_assistant.models.audio_analysis import AudioAnalysisData, AudioAnalysisError
@@ -108,7 +109,12 @@ LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.audio_analysis")
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from music_assistant_models.media_items import AudioFormat, AudioMetadata, Track
+    from music_assistant_models.media_items import (
+        AudioFormat,
+        AudioMetadata,
+        ProviderMapping,
+        Track,
+    )
     from music_assistant_models.streamdetails import StreamDetails
 
     from music_assistant.controllers.streams.audio_buffer import AudioBuffer
@@ -588,6 +594,28 @@ class AudioAnalysisController(AudioAnalysisDatabaseMixin):
                 table,
                 {"media_type": media_type.value, "item_id": item_id, "provider": provider_key},
             )
+
+    async def delete_measured_loudness(self, provider_mappings: Iterable[ProviderMapping]) -> None:
+        """
+        Delete the measured loudness of a track, keeping the loudness its tags or source supply.
+
+        :param provider_mappings: The provider mappings of the track.
+        """
+        if not self._database_ready:
+            return
+        for mapping in provider_mappings:
+            # analysis is stored under the domain or the instance id of the music source
+            for provider_key in {mapping.provider_domain, mapping.provider_instance}:
+                for table in (AA_TABLE_ANALYSIS, AA_TABLE_FAILURES):
+                    await self.database.delete(
+                        table,
+                        {
+                            "media_type": MediaType.TRACK.value,
+                            "item_id": mapping.item_id,
+                            "provider": provider_key,
+                            "aa_provider_domain": LOUDNESS_ANALYSIS_DOMAIN,
+                        },
+                    )
 
     async def get_audio_analysis(
         self,
@@ -1320,9 +1348,11 @@ class AudioAnalysisController(AudioAnalysisDatabaseMixin):
             return
 
         # Override content_type so ffmpeg decodes rather than re-muxing the source codec.
+        source_bit_depth = streamdetails.audio_format.bit_depth
         pcm_format = dataclasses.replace(
             streamdetails.audio_format,
-            content_type=ContentType.from_bit_depth(streamdetails.audio_format.bit_depth),
+            content_type=ContentType.from_bit_depth(source_bit_depth),
+            bit_depth=pcm_container_bit_depth(source_bit_depth),
         )
 
         accepted = await self._start_analysis_on_providers(
