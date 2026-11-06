@@ -161,6 +161,11 @@ class YoutubeProvider(MusicProvider):
         """Return the content details for the given track when it will be streamed."""
         stream_format = await self._get_stream_format(item_id)
         self.logger.debug("Found stream_format: %s for video %s", stream_format["format"], item_id)
+        if (wait := (stream_format.get("available_at") or 0) - time.time()) > 0:
+            # YouTube plays a pre-roll ad to some clients and refuses the stream url with a 403
+            # until that ad could have been skipped; yt-dlp reports when that is
+            self.logger.debug("Waiting %.1fs for YouTube to release video %s", wait, item_id)
+            await asyncio.sleep(wait)
         url: str = stream_format["url"]
         expiration = DEFAULT_STREAM_URL_EXPIRATION
         if parsed := parse_qs(urlparse(url).query):
