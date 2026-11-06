@@ -67,6 +67,7 @@ from music_assistant.controllers.player_queues.helpers import (
     played_from_album,
 )
 from music_assistant.controllers.player_queues.managed_pool import gate_tracks
+from music_assistant.controllers.player_queues.play_fallback import PlayFallbackMixin
 from music_assistant.controllers.webserver.helpers.auth_middleware import (
     get_current_user,
     set_current_user,
@@ -95,7 +96,7 @@ if TYPE_CHECKING:
     from music_assistant.providers.radio_playlist import RadioPlaylistProvider
 
 
-class QueueLoaderMixin(_PlayerQueuesBase):
+class QueueLoaderMixin(PlayFallbackMixin, _PlayerQueuesBase):
     """Load items into a queue: apply the enqueue option, resolve single items, refill the pool."""
 
     async def _enqueue_with_option(
@@ -207,6 +208,9 @@ class QueueLoaderMixin(_PlayerQueuesBase):
             # an idle/empty queue has no current item to insert after, so insert at and
             # start from the very first index instead of skipping past it
             play_at_index = 0 if queue.current_index is None else insert_at_index
+            # captured before the load, which extends queue_items with the items after it. A
+            # shuffled batch is mixed in with what was queued, so it has no own items to keep to.
+            fallback = None if shuffle else self._capture_play_fallback(queue_id, queue_items)
             if pin_first:
                 await self._load_pinned_first(queue_id, queue_items, play_at_index)
             else:
@@ -217,7 +221,7 @@ class QueueLoaderMixin(_PlayerQueuesBase):
                     shuffle=shuffle,
                 )
             next_index = min(play_at_index, len(self._queue_data[queue_id].items) - 1)
-            await self.play_index(queue_id, next_index)
+            await self._play_index_with_fallback(queue_id, next_index, fallback)
             return
         # handle add: add/append item(s) to the remaining queue items
         if option == QueueOption.ADD:

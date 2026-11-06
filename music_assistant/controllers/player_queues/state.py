@@ -30,6 +30,7 @@ from music_assistant.controllers.player_queues.helpers import has_dynamic_source
 
 if TYPE_CHECKING:
     from music_assistant.controllers.player_queues.helpers import CompareState
+    from music_assistant.controllers.player_queues.play_fallback import PlayFallback
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.player_queues")
 
@@ -66,6 +67,8 @@ class PlayerQueueData:
     prev_state: CompareState | None = None
     transitioning: bool = False
     play_action_refcount: int = 0
+    # what a running play request goes back to when none of its items start (local patch)
+    play_fallback: PlayFallback | None = None
     # skip seconds awaiting the playback lock and the item they apply to; a burst of presses
     # is merged into one seek
     pending_skip_seconds: int = 0

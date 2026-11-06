@@ -1352,6 +1352,9 @@ class PlayerQueuesController(QueueLoaderMixin, PlaybackTrackerMixin, StreamFeede
                         if isinstance(err, MediaNotFoundError):
                             queue_item.available = False
                 next_index = self._get_next_index(queue_id, index, allow_repeat=False)
+                self._raise_if_play_request_exhausted(
+                    queue_id, queue_item, next_index, err, attempts >= _MAX_LOAD_ATTEMPTS
+                )
                 if next_index is None and queue.is_dynamic and not refilled:
                     refilled = True
                     await self._fill_dynamic_tracks(queue_id)
